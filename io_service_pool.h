@@ -7,57 +7,58 @@
 #include <boost/asio.hpp>
 
 class io_service_pool : private boost::asio::noncopyable {
-public:
-	explicit io_service_pool(std::size_t pool_size) : next_io_service_(0) {
-		if (pool_size == 0) throw std::runtime_error("io_service_pool size is 0");
+  public:
+    explicit io_service_pool(std::size_t pool_size) : next_io_service_(0) {
+        if (pool_size == 0)
+            throw std::runtime_error("io_service_pool size is 0");
 
-		for (std::size_t i = 0; i < pool_size; ++i) {
-			io_service_ptr io_service(new boost::asio::io_service);
-			work_ptr work(new boost::asio::io_service::work(*io_service));
-			io_services_.push_back(io_service);
-			work_.push_back(work);
-		}
+        for (std::size_t i = 0; i < pool_size; ++i) {
+            io_service_ptr io_service(new boost::asio::io_service);
+            work_ptr work(new boost::asio::io_service::work(*io_service));
+            io_services_.push_back(io_service);
+            work_.push_back(work);
+        }
+    }
 
-	}
+    void run() {
+        // æŠŠæ‰€æœ‰çš„ioäº‹ä»¶æ”¾è¿›å­çº¿ç¨‹è¿›è¡Œç›‘å¬
+        std::vector<std::shared_ptr<std::thread>> threads;
+        for (std::size_t i = 0; i < io_services_.size(); ++i) {
+            threads.emplace_back(std::make_shared<std::thread>(
+                [](io_service_ptr svr) { svr->run(); }, io_services_[i]));
+        }
 
-	void run() {
-		// °ÑËùÓĞµÄioÊÂ¼ş·Å½ø×ÓÏß³Ì½øĞĞ¼àÌı
-		std::vector<std::shared_ptr<std::thread>> threads;
-		for (std::size_t i = 0; i < io_services_.size(); ++i) {
-			threads.emplace_back(
-				std::make_shared<std::thread>([](io_service_ptr svr) { svr->run(); }, io_services_[i]));
-		}
+        for (std::size_t i = 0; i < threads.size(); ++i)
+            threads[i]->join();
+    }
 
-		for (std::size_t i = 0; i < threads.size(); ++i) threads[i]->join();
-	}
+    void stop() {
+        for (std::size_t i = 0; i < io_services_.size(); ++i) {
+            io_services_[i]->stop();
+        }
+    }
 
-	void stop() {
-		for (std::size_t i = 0; i < io_services_.size(); ++i) {
-			io_services_[i]->stop();
-		}
-	}
+    // å¾ªç¯è¿”å›å¼•ç”¨
+    boost::asio::io_service &get_io_service() {
+        boost::asio::io_service &io_service = *io_services_[next_io_service_];
+        ++next_io_service_;
+        if (next_io_service_ == io_services_.size())
+            next_io_service_ = 0;
+        return io_service;
+    }
 
-	// Ñ­»··µ»ØÒıÓÃ
-	boost::asio::io_service& get_io_service() {
-		boost::asio::io_service& io_service = *io_services_[next_io_service_];
-		++next_io_service_;
-		if (next_io_service_ == io_services_.size()) next_io_service_ = 0;
-		return io_service;
-	}
+  private:
+    typedef std::shared_ptr<boost::asio::io_service> io_service_ptr;
+    typedef std::shared_ptr<boost::asio::io_service::work> work_ptr;
 
-private:
-	typedef std::shared_ptr<boost::asio::io_service> io_service_ptr;
-	typedef std::shared_ptr<boost::asio::io_service::work> work_ptr;
+    // io_service æ± ï¼Œå¾ªç¯æ± 
+    std::vector<io_service_ptr> io_services_;
 
-	// io_service ³Ø£¬Ñ­»·³Ø
-	std::vector<io_service_ptr> io_services_;
+    // io_service::work æ± ï¼Œä¿è¯io_serviceä¸€ç›´èƒ½å·¥ä½œ
+    std::vector<work_ptr> work_;
 
-	// io_service::work ³Ø£¬±£Ö¤io_serviceÒ»Ö±ÄÜ¹¤×÷
-	std::vector<work_ptr> work_;
-
-	// ÏÂÒ»¸öio_serviceµÄĞòºÅ
-	std::size_t next_io_service_;
+    // ä¸‹ä¸€ä¸ªio_serviceçš„åºå·
+    std::size_t next_io_service_;
 };
-
 
 #endif

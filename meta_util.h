@@ -7,85 +7,86 @@
 #include <type_traits>
 #include <utility>
 
-// º¯Êı²ÎÊıÀàĞÍİÍÈ¡Ä£°å
+// å‡½æ•°å‚æ•°ç±»å‹èƒå–æ¨¡æ¿
 
 namespace meta_util {
-	template<typename T>
-	using remove_const_reference_t = std::remove_const_t<std::remove_reference_t<T>>;
+template <typename T>
+using remove_const_reference_t =
+    std::remove_const_t<std::remove_reference_t<T>>;
 
-	template <typename T>
-	struct function_traits;
+template <typename T> struct function_traits;
 
-	// Í¨ÓÃº¯Êı£¬Ìí¼Ó¶àÒ»¸östring£¬±íÊ¾º¯ÊıÃû
-	template <typename Ret, typename... Args>
-	struct function_traits<Ret(Args...)> {
-		enum { arity = sizeof...(Args) };
-		using return_type = Ret;
-		using stl_function_type = std::function<Ret(Args...)>;
-		using pointer = Ret(*)(Args...);
-		using args_tuple = std::tuple<std::string, std::remove_const_t<std::remove_reference_t<Args>>...>;
-	};
+// é€šç”¨å‡½æ•°ï¼Œæ·»åŠ å¤šä¸€ä¸ªstringï¼Œè¡¨ç¤ºå‡½æ•°å
+template <typename Ret, typename... Args> struct function_traits<Ret(Args...)> {
+    enum { arity = sizeof...(Args) };
+    using return_type = Ret;
+    using stl_function_type = std::function<Ret(Args...)>;
+    using pointer = Ret (*)(Args...);
+    using args_tuple =
+        std::tuple<std::string,
+                   std::remove_const_t<std::remove_reference_t<Args>>...>;
+};
 
-	// ²¿·ÖÌØ»¯£ºµÚÒ»¸ö²ÎÊı
-	template<typename Ret, typename Arg, typename... Args>
-	struct function_traits<Ret(Arg, Args...)>
-	{
-		enum { arity = sizeof...(Args) + 1 };
-		using return_type = Ret;
-		using stl_function_type = std::function<Ret(Arg, Args...)>;
-		using pointer = Ret(*)(Arg, Args...);
-		using args_tuple = std::tuple<std::string, Arg, std::remove_const_t<std::remove_reference_t<Args>>...>;
-	};
+// éƒ¨åˆ†ç‰¹åŒ–ï¼šç¬¬ä¸€ä¸ªå‚æ•°
+template <typename Ret, typename Arg, typename... Args>
+struct function_traits<Ret(Arg, Args...)> {
+    enum { arity = sizeof...(Args) + 1 };
+    using return_type = Ret;
+    using stl_function_type = std::function<Ret(Arg, Args...)>;
+    using pointer = Ret (*)(Arg, Args...);
+    using args_tuple =
+        std::tuple<std::string, Arg,
+                   std::remove_const_t<std::remove_reference_t<Args>>...>;
+};
 
-	// ²¿·ÖÌØ»¯£ºÎŞ²ÎÊı
-	template<typename Ret>
-	struct function_traits<Ret()> {
-	public:
-		enum { arity = 0 };
-		using return_type = Ret;
-		using stl_function_type = std::function<Ret()>;
-		using pointer = Ret(*)();
-		using args_tuple = std::tuple<std::string>;
-	};
+// éƒ¨åˆ†ç‰¹åŒ–ï¼šæ— å‚æ•°
+template <typename Ret> struct function_traits<Ret()> {
+  public:
+    enum { arity = 0 };
+    using return_type = Ret;
+    using stl_function_type = std::function<Ret()>;
+    using pointer = Ret (*)();
+    using args_tuple = std::tuple<std::string>;
+};
 
-	//²¿·ÖÌØ»¯£ºº¯ÊıÖ¸Õë
-	template <typename Ret, typename... Args>
-	struct function_traits<Ret(*)(Args...)> : function_traits<Ret(Args...)> {};
+// éƒ¨åˆ†ç‰¹åŒ–ï¼šå‡½æ•°æŒ‡é’ˆ
+template <typename Ret, typename... Args>
+struct function_traits<Ret (*)(Args...)> : function_traits<Ret(Args...)> {};
 
+// éƒ¨åˆ†ç‰¹åŒ–ï¼šstd::function
+template <typename Ret, typename... Args>
+struct function_traits<std::function<Ret(Args...)>>
+    : function_traits<Ret(Args...)> {};
 
-	//²¿·ÖÌØ»¯£ºstd::function
-	template <typename Ret, typename... Args>
-	struct function_traits<std::function<Ret(Args...)>> : function_traits<Ret(Args...)> {};
+// éƒ¨åˆ†ç‰¹åŒ–ï¼šæˆå‘˜å‡½æ•°æŒ‡é’ˆ
+template <typename ReturnType, typename ClassType, typename... Args>
+struct function_traits<ReturnType (ClassType::*)(Args...)>
+    : function_traits<ReturnType(Args...)> {};
 
-	//²¿·ÖÌØ»¯£º³ÉÔ±º¯ÊıÖ¸Õë
-	template <typename ReturnType, typename ClassType, typename... Args>
-	struct function_traits<ReturnType(ClassType::*)(Args...)> : function_traits<ReturnType(Args...)> {};
+// éƒ¨åˆ†ç‰¹åŒ–ï¼šconst æˆå‘˜å‡½æ•°æŒ‡é’ˆ
+template <typename ReturnType, typename ClassType, typename... Args>
+struct function_traits<ReturnType (ClassType::*)(Args...) const>
+    : function_traits<ReturnType(Args...)> {};
 
-	//²¿·ÖÌØ»¯£ºconst ³ÉÔ±º¯ÊıÖ¸Õë
-	template <typename ReturnType, typename ClassType, typename... Args>
-	struct function_traits<ReturnType(ClassType::*)(Args...) const> : function_traits<ReturnType(Args...)> {};
+// éƒ¨åˆ†ç‰¹åŒ–ï¼šå‡½æ•°å¯¹è±¡
+template <typename Callable>
+struct function_traits : function_traits<decltype(&Callable::operator())> {};
 
-	// ²¿·ÖÌØ»¯£ºº¯Êı¶ÔÏó
-	template<typename Callable>
-	struct function_traits : function_traits<decltype(&Callable::operator())> {};
+template <int N, typename... Args>
+using nth_type_of = std::tuple_element_t<N, std::tuple<Args...>>;
 
+template <typename... Args>
+using last_type_of = nth_type_of<sizeof...(Args) - 1, Args...>;
 
-	template <int N, typename... Args>
-	using nth_type_of = std::tuple_element_t<N, std::tuple<Args...>>;
-
-	template <typename... Args>
-	using last_type_of = nth_type_of<sizeof...(Args) - 1, Args...>;
-
-
-	// ĞÂÔöº¯ÊıÄ£°å£º´òÓ¡²ÎÊıÀàĞÍ
-	template <typename Tuple, std::size_t Index = 0>
-	void printArgsTupleTypes() {
-		if constexpr (Index < std::tuple_size_v<Tuple>) {
-			std::cout << "Type at index " << Index << ": "
-				<< typeid(std::tuple_element_t<Index, Tuple>).name() << std::endl;
-			printArgsTupleTypes<Tuple, Index + 1>();
-		}
-	}
+// æ–°å¢å‡½æ•°æ¨¡æ¿ï¼šæ‰“å°å‚æ•°ç±»å‹
+template <typename Tuple, std::size_t Index = 0> void printArgsTupleTypes() {
+    if constexpr (Index < std::tuple_size_v<Tuple>) {
+        std::cout << "Type at index " << Index << ": "
+                  << typeid(std::tuple_element_t<Index, Tuple>).name()
+                  << std::endl;
+        printArgsTupleTypes<Tuple, Index + 1>();
+    }
 }
+} // namespace meta_util
 
 #endif

@@ -12,343 +12,338 @@
 
 const constexpr size_t DEFAULT_TIMEOUT = 5000; // milliseconds
 
-class rpc_client : private boost::asio::noncopyable  {
-public:
-	rpc_client(const std::string& host, unsigned short port) :
-		socket_(ioservice_),
-		work_(ioservice_),
-		host_(host),
-		port_(port),
-		body_(INIT_BUF_SIZE)
-	{
-		has_connected_ = false;
-		conn_val = false;
-		write_fg_ = false;
-		m_req_id = 0;
-		// ´´½¨×ÓÏß³Ì
-		thd_ = std::make_shared<std::thread>([this] { ioservice_.run(); });
-		// ´´½¨Ğ´×ÓÏß³Ì
-		write_thd_ = std::make_shared<std::thread>([this] { write_callback(); });
-	}
+class rpc_client : private boost::asio::noncopyable {
+  public:
+    rpc_client(const std::string &host, unsigned short port)
+        : socket_(ioservice_), work_(ioservice_), host_(host), port_(port),
+          body_(INIT_BUF_SIZE) {
+        has_connected_ = false;
+        conn_val = false;
+        write_fg_ = false;
+        m_req_id = 0;
+        // åˆ›å»ºå­çº¿ç¨‹
+        thd_ = std::make_shared<std::thread>([this] { ioservice_.run(); });
+        // åˆ›å»ºå†™å­çº¿ç¨‹
+        write_thd_ =
+            std::make_shared<std::thread>([this] { write_callback(); });
+    }
 
-	~rpc_client() {
-		close();
-		stop();
-	}
+    ~rpc_client() {
+        close();
+        stop();
+    }
 
-	// ¿ªÊ¼Á¬½Ó
-	bool connect(size_t timeout = 3) {
-		if (has_connected_)
-			return true;
-		assert(port_ != 0);
-		auto addr = boost::asio::ip::address::from_string(host_);
-		boost::asio::ip::tcp::endpoint ep(boost::asio::ip::address::from_string(host_), port_);
-		socket_.async_connect(ep, [this](const boost::system::error_code& ec) {
-			if (has_connected_) {
-				return;
-			}
-			if (ec) {
-				has_connected_ = false;
-				{
-					std::unique_lock<std::mutex> lock(conn_mtx_);
-					conn_val = true;
+    // å¼€å§‹è¿æ¥
+    bool connect(size_t timeout = 3) {
+        if (has_connected_)
+            return true;
+        assert(port_ != 0);
+        auto addr = boost::asio::ip::address::from_string(host_);
+        boost::asio::ip::tcp::endpoint ep(
+            boost::asio::ip::address::from_string(host_), port_);
+        socket_.async_connect(ep, [this](const boost::system::error_code &ec) {
+            if (has_connected_) {
+                return;
+            }
+            if (ec) {
+                has_connected_ = false;
+                {
+                    std::unique_lock<std::mutex> lock(conn_mtx_);
+                    conn_val = true;
+                }
+                conn_cond_.notify_one();
+                return;
+            } else {
+                has_connected_ = true;
+                {
+                    std::unique_lock<std::mutex> lock(conn_mtx_);
+                    conn_val = true;
+                }
 
-				}
-				conn_cond_.notify_one();
-				return;
-			}
-			else {
-				has_connected_ = true;
-				{
-					std::unique_lock<std::mutex> lock(conn_mtx_);
-					conn_val = true;
+                // ä¸€ç›´å¾ªç¯è¯»å–
+                do_read();
 
-				}
+                conn_cond_.notify_one();
+                printf("connected!\n");
+            }
+        });
+        // æ¡ä»¶å˜é‡èµ·å®šæ—¶ä½œç”¨
+        wait_conn(timeout);
+        return has_connected_;
+    }
 
-				// Ò»Ö±Ñ­»·¶ÁÈ¡
-				do_read();
+    template <typename T> T calcThread(std::uint64_t req_id) {
+        std::string curr;
+        // ç­‰å¾…æ¡ä»¶å˜é‡
+        std::unique_lock<std::mutex> slock(m_pro_mtx_);
+        m_pro_cond_.wait(slock, [this, req_id] {
+            return !m_product_.empty() &&
+                   m_product_.find(req_id) != m_product_.end();
+        });
+        curr = m_product_[req_id];
+        m_product_.erase(req_id); // åˆ é™¤è¯¥ä¿¡å·
+        slock.unlock();
 
-				conn_cond_.notify_one();
-				printf("connected!\n");
-			}
-			});
-		// Ìõ¼ş±äÁ¿Æğ¶¨Ê±×÷ÓÃ
-		wait_conn(timeout);
-		return has_connected_;
-	}
+        // è§£ç 
+        RPCbufferPack::msgpack_codec codec;
+        auto tp = codec.unpack<std::tuple<int, T>>(curr.data(), curr.size());
 
-	template <typename T>
-	T calcThread(std::uint64_t req_id) {
-		std::string curr;
-		//µÈ´ıÌõ¼ş±äÁ¿
-		std::unique_lock<std::mutex> slock(m_pro_mtx_);
-		m_pro_cond_.wait(slock, [this, req_id] {
-			return !m_product_.empty() && m_product_.find(req_id) != m_product_.end();
-			});
-		curr = m_product_[req_id];
-		m_product_.erase(req_id);// É¾³ı¸ÃĞÅºÅ
-		slock.unlock();
+        // è¿”å›ç»“æœ
+        return std::get<1>(tp);
+    }
 
-		// ½âÂë
-		RPCbufferPack::msgpack_codec codec;
-		auto tp = codec.unpack<std::tuple<int, T>>(curr.data(), curr.size());
+    // é˜»å¡å¼è°ƒç”¨
+    template <typename T, typename... Args>
+    T call(const std::string &rpc_name, Args &&...args) {
+        req_mtx_.lock();
+        std::uint64_t tmpReqId = m_req_id;
+        m_req_id++;
+        req_mtx_.unlock();
 
-		// ·µ»Ø½á¹û
-		return std::get<1>(tp);
-	}
+        // æŠŠå‘é€ä¿¡æ¯æ·»åŠ åˆ°å‘é€é˜Ÿåˆ—
 
+        RPCbufferPack::msgpack_codec codec;
+        auto que = codec.pack_args(rpc_name, std::forward<Args>(args)...);
+        {
+            std::unique_lock<std::mutex> lock(write_mtx_);
+            write_box_.emplace_back(client_message_type{
+                tmpReqId, request_type::req_res,
+                std::make_shared<buffer_type>(std::move(que))});
+        }
 
-	// ×èÈûÊ½µ÷ÓÃ
-	template <typename T, typename... Args>
-	T call(const std::string& rpc_name, Args &&... args) {
-		req_mtx_.lock();
-		std::uint64_t tmpReqId = m_req_id;
-		m_req_id++;
-		req_mtx_.unlock();
+        // write(tmpReqId, request_type::req_res, std::move(que));
+        return calcThread<T>(tmpReqId);
+    }
 
-		// °Ñ·¢ËÍĞÅÏ¢Ìí¼Óµ½·¢ËÍ¶ÓÁĞ
+    // éé˜»å¡å¼futureè°ƒç”¨,ä½¿ç”¨get()å¾—åˆ°ç»“æœ
+    template <typename T, typename... Args>
+    std::shared_ptr<std::future<T>> async_call(const std::string &rpc_name,
+                                               Args &&...args) {
+        req_mtx_.lock();
+        std::uint64_t tmpReqId = m_req_id;
+        m_req_id++;
+        req_mtx_.unlock();
 
-		RPCbufferPack::msgpack_codec codec;
-		auto que = codec.pack_args(rpc_name, std::forward<Args>(args)...);
-		{
-			std::unique_lock<std::mutex> lock(write_mtx_);
-			write_box_.emplace_back(client_message_type{ tmpReqId, request_type::req_res, std::make_shared<buffer_type>(std::move(que)) });
-		}
+        // æŠŠå‘é€ä¿¡æ¯æ·»åŠ åˆ°å‘é€é˜Ÿåˆ—
 
-		//write(tmpReqId, request_type::req_res, std::move(que));
-		return calcThread<T>(tmpReqId);
-	}
+        RPCbufferPack::msgpack_codec codec;
+        auto que = codec.pack_args(rpc_name, std::forward<Args>(args)...);
+        {
+            std::unique_lock<std::mutex> lock(write_mtx_);
+            write_box_.emplace_back(client_message_type{
+                tmpReqId, request_type::req_res,
+                std::make_shared<buffer_type>(std::move(que))});
+        }
 
+        // å¼‚æ­¥çº¿ç¨‹ç­‰å¾…å›å¤
+        auto ret = std::make_shared<std::future<T>>(std::async(
+            std::launch::async, &rpc_client::calcThread<T>, this, tmpReqId));
+        return ret;
+    }
 
-	// ·Ç×èÈûÊ½futureµ÷ÓÃ,Ê¹ÓÃget()µÃµ½½á¹û
-	template <typename T, typename... Args>
-	std::shared_ptr<std::future<T>> async_call(const std::string& rpc_name, Args &&... args) {
-		req_mtx_.lock();
-		std::uint64_t tmpReqId = m_req_id;
-		m_req_id++;
-		req_mtx_.unlock();
+  private:
+    void stop() {
+        if (thd_ != nullptr) {
+            ioservice_.stop();
+            if (thd_->joinable()) {
+                thd_->join();
+            }
+            thd_ = nullptr;
+        }
+        // å…³é—­å†™çº¿ç¨‹
+        if (write_thd_ != nullptr) {
+            if (write_thd_->joinable()) {
+                write_thd_->join();
+            }
+            write_thd_ = nullptr;
+        }
+    }
 
-		// °Ñ·¢ËÍĞÅÏ¢Ìí¼Óµ½·¢ËÍ¶ÓÁĞ
+    void close() {
+        boost::system::error_code ignored_ec;
+        socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both,
+                         ignored_ec);
+        socket_.close(ignored_ec);
+        has_connected_ = false;
+        // ä¿®æ”¹å†™æ ‡å¿—
+        {
+            std::unique_lock<std::mutex> lock(write_mtx_);
+            write_fg_ = true;
+        }
+    }
 
-		RPCbufferPack::msgpack_codec codec;
-		auto que = codec.pack_args(rpc_name, std::forward<Args>(args)...);
-		{
-			std::unique_lock<std::mutex> lock(write_mtx_);
-			write_box_.emplace_back(client_message_type{ tmpReqId, request_type::req_res, std::make_shared<buffer_type>(std::move(que)) });
-		}
+    bool wait_conn(size_t timeout) {
+        if (has_connected_) {
+            return true;
+        }
+        // æœ€å¤šç­‰å¾… timeout ç§’ï¼Œæˆ–è€…ç›´åˆ° conn_val å˜ä¸º trueã€‚
+        // result å˜é‡å°†å‘Šè¯‰ä½ ç­‰å¾…çš„ç»“æœï¼Œè¶…æ—¶falseï¼Œç­‰å¾…åˆ°æ¡ä»¶çš„æ»¡è¶³ä¸ºtrueã€‚
+        std::unique_lock<std::mutex> lock(conn_mtx_);
+        bool result = conn_cond_.wait_for(lock, std::chrono::seconds(timeout),
+                                          [this] { return conn_val; });
+        return result;
+    }
 
-		// Òì²½Ïß³ÌµÈ´ı»Ø¸´
-		auto ret = std::make_shared<std::future<T>>(std::async(std::launch::async, &rpc_client::calcThread<T>, this, tmpReqId));
-		return ret;
-	}
+    void do_read() {
+        // è¯»å–åè®®å¤´
+        boost::asio::async_read(
+            socket_, boost::asio::buffer(head_, HEAD_LEN),
+            [this](boost::system::error_code ec, std::size_t length) {
+                if (!socket_.is_open()) {
+                    printf("socket close\n");
+                    return;
+                }
+                if (!ec) {
+                    std::uint64_t reqidTmp = 0;
+                    request_type reqTypeTmp;
+                    uint32_t body_len = 0;
+                    memcpy(&body_len, head_, 4);
+                    memcpy(&reqidTmp, head_ + 4, 8);
+                    memcpy(&reqTypeTmp, head_ + 12, 1);
+                    if (body_len > 0 && body_len < MAX_BUF_LEN) {
+                        if (body_.size() < body_len) {
+                            body_.resize(body_len);
+                        }
+                        read_body(reqidTmp, reqTypeTmp, body_len);
+                        return;
+                    }
+                    if (body_len == 0) {
+                        // LOG
+                        printf("body information is illeagl!\n");
+                        return;
+                    }
+                } else {
+                    // å‡ºé”™äº†æ–­å¼€è¿æ¥
+                    printf("error in read head!\n");
+                    close();
+                    return;
+                }
+            });
+    }
 
+    // è¯»å–æºå¸¦çš„ä¿¡æ¯
+    void read_body(std::uint64_t req_id, request_type req_type,
+                   size_t body_len) {
+        boost::asio::async_read(
+            socket_, boost::asio::buffer(body_.data(), body_len),
+            [this, req_id, req_type, body_len](boost::system::error_code ec,
+                                               std::size_t length) {
+                if (!socket_.is_open()) {
+                    printf("socket close\n");
+                    return;
+                }
+                if (!ec) {
+                    deal_body(req_id, body_.data(), length);
+                    // é€’å½’è¿›è¡Œä¸‹ä¸€æ¬¡è¯»å–
+                    do_read();
+                } else {
+                    printf("error in read body!\n");
+                    close();
+                    return;
+                }
+            });
+    }
 
+    void deal_body(std::uint64_t req_id, const char *data, std::size_t size) {
+        RPCbufferPack::msgpack_codec codec;
+        auto p = codec.unpack<std::tuple<int>>(data, size);
+        result_code tmp = (result_code)std::get<0>(p);
+        if (tmp == result_code::OK) {
+            printf("call-response success!\n");
+            std::string strFromCharArray(data, size);
+            // ç”Ÿäº§è€…
+            {
+                std::unique_lock<std::mutex> slock(m_pro_mtx_);
+                m_product_.emplace(req_id, std::move(strFromCharArray));
+            }
+            m_pro_cond_.notify_all();
 
-private:
-	void stop() {
-		if (thd_ != nullptr) {
-			ioservice_.stop();
-			if (thd_->joinable()) {
-				thd_->join();
-			}
-			thd_ = nullptr;
-		}
-		// ¹Ø±ÕĞ´Ïß³Ì
-		if (write_thd_ != nullptr) {
-			if (write_thd_->joinable()) {
-				write_thd_->join();
-			}
-			write_thd_ = nullptr;
-		}
+        } else {
+            printf("call-response fail!\n");
+        }
+    }
 
-	}
+    void write_callback() {
+        while (!write_fg_) {
+            while (!write_box_.empty()) {
+                auto &msg = write_box_.front();
+                uint32_t sendsz = msg.content->size();
+                // ä»¥ä¸‹4ä¸ªbufferï¼Œç”¨çš„æ˜¯åœ°å€ï¼Œå‘é€å‰éœ€è¦ä¿è¯å†…å®¹ä»å­˜åœ¨
+                std::array<boost::asio::const_buffer, 4> write_buffers;
+                write_buffers[0] =
+                    boost::asio::buffer(&sendsz, sizeof(uint32_t));
+                write_buffers[1] =
+                    boost::asio::buffer(&msg.req_id, sizeof(uint64_t));
+                write_buffers[2] =
+                    boost::asio::buffer(&msg.req_type, sizeof(request_type));
+                write_buffers[3] =
+                    boost::asio::buffer(msg.content->data(), sendsz);
+                boost::asio::write(socket_, write_buffers);
+                {
+                    std::unique_lock<std::mutex> lock(write_mtx_);
+                    write_box_.pop_front();
+                }
+            }
+        }
+    }
 
+    // å¼‚æ­¥å‘é€è¯·æ±‚ï¼Œæ²¡æœ‰å¹¶å‘ä¿æŠ¤
+    void write(std::uint64_t req_id, request_type type, buffer_type &&message) {
+        size_t size = message.size();
+        assert(size < MAX_BUF_LEN);
+        std::array<boost::asio::const_buffer, 4> write_buffers;
+        uint32_t write_size_curr = message.size();
+        write_buffers[0] =
+            boost::asio::buffer(&write_size_curr, sizeof(uint32_t));
+        write_buffers[1] = boost::asio::buffer(&req_id, sizeof(uint64_t));
+        write_buffers[2] = boost::asio::buffer(&type, sizeof(request_type));
+        write_buffers[3] = boost::asio::buffer(message.data(), write_size_curr);
+        boost::asio::async_write(
+            socket_, write_buffers,
+            [this](boost::system::error_code error, std::size_t length) {
+                if (!error) {
+                    std::cout << "call completed. Bytes transferred: " << length
+                              << std::endl;
+                } else {
+                    std::cerr << "call error: " << error.message() << std::endl;
+                }
+            });
+    }
 
-	void close() {
-		boost::system::error_code ignored_ec;
-		socket_.shutdown(boost::asio::ip::tcp::socket::shutdown_both, ignored_ec);
-		socket_.close(ignored_ec);
-		has_connected_ = false;
-		// ĞŞ¸ÄĞ´±êÖ¾
-		{
-			std::unique_lock<std::mutex> lock(write_mtx_);
-			write_fg_ = true;
-		}
+  private:
+    boost::asio::io_service ioservice_; // äº‹ä»¶åˆ†å‘å™¨
+    boost::asio::ip::tcp::socket socket_;
+    boost::asio::io_service::work work_;
+    std::shared_ptr<std::thread> thd_ = nullptr;
 
-	}
+    std::string host_;
+    unsigned short port_ = 0;
+    char head_[HEAD_LEN] = {};
+    std::vector<char> body_;
 
+    std::atomic_bool has_connected_ = {false};
+    std::mutex conn_mtx_; // è¿æ¥å®šæ—¶çš„æ¡ä»¶å˜é‡çš„äº’æ–¥é”
+    std::condition_variable conn_cond_; // è¿æ¥å®šæ—¶çš„æ¡ä»¶å˜é‡
+    bool conn_val = false;
 
-	bool wait_conn(size_t timeout) {
-		if (has_connected_) {
-			return true;
-		}
-		// ×î¶àµÈ´ı timeout Ãë£¬»òÕßÖ±µ½ conn_val ±äÎª true¡£
-		// result ±äÁ¿½«¸æËßÄãµÈ´ıµÄ½á¹û£¬³¬Ê±false£¬µÈ´ıµ½Ìõ¼şµÄÂú×ãÎªtrue¡£
-		std::unique_lock<std::mutex> lock(conn_mtx_);
-		bool result = conn_cond_.wait_for(lock, std::chrono::seconds(timeout),
-			[this] { return conn_val; });
-		return result;
-	}
+    std::mutex req_mtx_;    // è¯·æ±‚idçš„å¹¶å‘ä¿æŠ¤é”
+    std::uint64_t m_req_id; // è¯·æ±‚id
 
-	void do_read() {
-		// ¶ÁÈ¡Ğ­ÒéÍ·
-		boost::asio::async_read(socket_, boost::asio::buffer(head_, HEAD_LEN),
-			[this](boost::system::error_code ec, std::size_t length) {
-				if (!socket_.is_open()) {
-					printf("socket close\n");
-					return;
-				}
-				if (!ec) {
-					std::uint64_t reqidTmp = 0;
-					request_type reqTypeTmp;
-					uint32_t body_len = 0;
-					memcpy(&body_len, head_, 4);
-					memcpy(&reqidTmp, head_ + 4, 8);
-					memcpy(&reqTypeTmp, head_ + 12, 1);
-					if (body_len > 0 && body_len < MAX_BUF_LEN) {
-						if (body_.size() < body_len) {
-							body_.resize(body_len);
-						}
-						read_body(reqidTmp, reqTypeTmp, body_len);
-						return;
-					}
-					if (body_len == 0) {
-						// LOG
-						printf("body information is illeagl!\n");
-						return;
-					}
-				}
-				else {
-					// ³ö´íÁË¶Ï¿ªÁ¬½Ó
-					printf("error in read head!\n");
-					close();
-					return;
-				}
-			});
-	}
+    // æ”¶åˆ°æ¶ˆæ¯çš„é€šçŸ¥æœºåˆ¶ï¼Œç”Ÿäº§è€…æ¶ˆè´¹è€…æ¨¡å‹
+    std::mutex m_pro_mtx_;
+    std::condition_variable m_pro_cond_;
+    std::unordered_map<std::uint64_t, std::string> m_product_;
 
-	// ¶ÁÈ¡Ğ¯´øµÄĞÅÏ¢
-	void read_body(std::uint64_t req_id, request_type req_type, size_t body_len) {
-		boost::asio::async_read(socket_, boost::asio::buffer(body_.data(), body_len),
-			[this, req_id, req_type, body_len](boost::system::error_code ec, std::size_t length) {
-				if (!socket_.is_open()) {
-					printf("socket close\n");
-					return;
-				}
-				if (!ec) {
-					deal_body(req_id, body_.data(), length);
-					// µİ¹é½øĞĞÏÂÒ»´Î¶ÁÈ¡
-					do_read();
-				}
-				else {
-					printf("error in read body!\n");
-					close();
-					return;
-				}
-			});
-	}
-
-
-	void deal_body(std::uint64_t req_id, const char* data, std::size_t size) {
-		RPCbufferPack::msgpack_codec codec;
-		auto p = codec.unpack<std::tuple<int>>(data, size);
-		result_code tmp = (result_code)std::get<0>(p);
-		if (tmp == result_code::OK) {
-			printf("call-response success!\n");
-			std::string strFromCharArray(data, size);
-			// Éú²úÕß
-			{
-				std::unique_lock<std::mutex> slock(m_pro_mtx_);
-				m_product_.emplace(req_id, std::move(strFromCharArray));
-			}
-			m_pro_cond_.notify_all();
-
-		}
-		else {
-			printf("call-response fail!\n");
-		}
-	}
-
-
-	void write_callback() {
-		while (!write_fg_) {
-			while (!write_box_.empty()) {
-				auto& msg = write_box_.front();
-				uint32_t sendsz = msg.content->size();
-				// ÒÔÏÂ4¸öbuffer£¬ÓÃµÄÊÇµØÖ·£¬·¢ËÍÇ°ĞèÒª±£Ö¤ÄÚÈİÈÔ´æÔÚ
-				std::array<boost::asio::const_buffer, 4> write_buffers;
-				write_buffers[0] = boost::asio::buffer(&sendsz, sizeof(uint32_t));
-				write_buffers[1] = boost::asio::buffer(&msg.req_id, sizeof(uint64_t));
-				write_buffers[2] = boost::asio::buffer(&msg.req_type, sizeof(request_type));
-				write_buffers[3] = boost::asio::buffer(msg.content->data(), sendsz);
-				boost::asio::write(socket_, write_buffers);
-				{
-					std::unique_lock<std::mutex> lock(write_mtx_);
-					write_box_.pop_front();
-				}
-			}
-		}
-	}
-
-
-	// Òì²½·¢ËÍÇëÇó£¬Ã»ÓĞ²¢·¢±£»¤
-	void write(std::uint64_t req_id, request_type type, buffer_type&& message) {
-		size_t size = message.size();
-		assert(size < MAX_BUF_LEN);
-		std::array<boost::asio::const_buffer, 4> write_buffers;
-		uint32_t write_size_curr = message.size();
-		write_buffers[0] = boost::asio::buffer(&write_size_curr, sizeof(uint32_t));
-		write_buffers[1] = boost::asio::buffer(&req_id, sizeof(uint64_t));
-		write_buffers[2] = boost::asio::buffer(&type, sizeof(request_type));
-		write_buffers[3] = boost::asio::buffer(message.data(), write_size_curr);
-		boost::asio::async_write(socket_, write_buffers, [this](boost::system::error_code error, std::size_t length) {
-			if (!error) {
-				std::cout << "call completed. Bytes transferred: " << length << std::endl;
-			}
-			else {
-				std::cerr << "call error: " << error.message() << std::endl;
-			}
-			});
-	}
-
-
-
-private:
-	boost::asio::io_service ioservice_; //ÊÂ¼ş·Ö·¢Æ÷
-	boost::asio::ip::tcp::socket socket_;
-	boost::asio::io_service::work work_;
-	std::shared_ptr<std::thread> thd_ = nullptr;
-
-	std::string host_;
-	unsigned short port_ = 0;
-	char head_[HEAD_LEN] = {};
-	std::vector<char> body_;
-
-	std::atomic_bool has_connected_ = { false };
-	std::mutex conn_mtx_; // Á¬½Ó¶¨Ê±µÄÌõ¼ş±äÁ¿µÄ»¥³âËø
-	std::condition_variable conn_cond_; //Á¬½Ó¶¨Ê±µÄÌõ¼ş±äÁ¿
-	bool conn_val = false;
-
-	std::mutex req_mtx_; // ÇëÇóidµÄ²¢·¢±£»¤Ëø
-	std::uint64_t m_req_id; // ÇëÇóid
-
-	// ÊÕµ½ÏûÏ¢µÄÍ¨Öª»úÖÆ£¬Éú²úÕßÏû·ÑÕßÄ£ĞÍ
-	std::mutex m_pro_mtx_;
-	std::condition_variable m_pro_cond_;
-	std::unordered_map < std::uint64_t, std::string> m_product_;
-
-	// ·¢ËÍÏûÏ¢µÄÍ¨Öª»úÖÆ
-	bool write_fg_ = false;
-	std::shared_ptr<std::thread> write_thd_ = nullptr;
-	std::mutex write_mtx_;
-	struct client_message_type {
-		std::uint64_t req_id;
-		request_type req_type;
-		std::shared_ptr<buffer_type> content;
-	};
-	std::deque<client_message_type> write_box_;
-
+    // å‘é€æ¶ˆæ¯çš„é€šçŸ¥æœºåˆ¶
+    bool write_fg_ = false;
+    std::shared_ptr<std::thread> write_thd_ = nullptr;
+    std::mutex write_mtx_;
+    struct client_message_type {
+        std::uint64_t req_id;
+        request_type req_type;
+        std::shared_ptr<buffer_type> content;
+    };
+    std::deque<client_message_type> write_box_;
 };
-
 
 #endif

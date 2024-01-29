@@ -10,182 +10,184 @@
 #include "connection.h"
 #include "io_service_pool.h"
 
-
-// µ¥ÀıÄ£Ê½²»¿É¸´ÖÆ
+// å•ä¾‹æ¨¡å¼ä¸å¯å¤åˆ¶
 class rpc_server : private boost::asio::noncopyable {
-public:
-	rpc_server(unsigned short port, size_t size, size_t timeout_seconds = 15, size_t check_seconds = 10) :
-		io_service_pool_(size),
-		acceptor_(io_service_pool_.get_io_service(), boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port)),
-		timeout_seconds_(timeout_seconds),
-		check_seconds_(check_seconds)
-	{
-		stop_check_ = false;
-		conn_id_ = 0;
-		// ³õÊ¼»¯×¢²áº¯Êı±íÖ¸Õë
-		sharedMapPtr_ = std::make_shared<std::unordered_map<std::string, std::function<void(const char*, size_t, std::string&)>>>();
-		// ¿ªÊ¼µİ¹éµÈ´ıÁ¬½Ó
-		do_accept();
-		// Æô¶¯Ïß³ÌÓÃÓÚÇåÀíÉ¾³ı³¬Ê±Á¬½Ó,¼õÉÙ¿Õ¼äÕ¼ÓÃ
-		check_thread_ = std::make_shared<std::thread>([this] { this->clean(); });
-	};
+  public:
+    rpc_server(unsigned short port, size_t size, size_t timeout_seconds = 15,
+               size_t check_seconds = 10)
+        : io_service_pool_(size),
+          acceptor_(
+              io_service_pool_.get_io_service(),
+              boost::asio::ip::tcp::endpoint(boost::asio::ip::tcp::v4(), port)),
+          timeout_seconds_(timeout_seconds), check_seconds_(check_seconds) {
+        stop_check_ = false;
+        conn_id_ = 0;
+        // åˆå§‹åŒ–æ³¨å†Œå‡½æ•°è¡¨æŒ‡é’ˆ
+        sharedMapPtr_ = std::make_shared<std::unordered_map<
+            std::string,
+            std::function<void(const char *, size_t, std::string &)>>>();
+        // å¼€å§‹é€’å½’ç­‰å¾…è¿æ¥
+        do_accept();
+        // å¯åŠ¨çº¿ç¨‹ç”¨äºæ¸…ç†åˆ é™¤è¶…æ—¶è¿æ¥,å‡å°‘ç©ºé—´å ç”¨
+        check_thread_ =
+            std::make_shared<std::thread>([this] { this->clean(); });
+    };
 
+    ~rpc_server() {
+        {
+            std::unique_lock<std::mutex> lock(mtx_);
+            stop_check_ = true;
+            cv_.notify_all();
+        }
+        check_thread_->join();
+        io_service_pool_.stop();
+    }
 
-	~rpc_server() {
-		{
-			std::unique_lock<std::mutex> lock(mtx_);
-			stop_check_ = true;
-			cv_.notify_all();
-		}
-		check_thread_->join();
-		io_service_pool_.stop();
-	}
+    // å¼€å§‹æœåŠ¡ï¼Œåˆ›å»ºå­çº¿ç¨‹ç›‘å¬io_service
+    void run() { io_service_pool_.run(); }
 
-	// ¿ªÊ¼·şÎñ£¬´´½¨×ÓÏß³Ì¼àÌıio_service
-	void run() {
-		io_service_pool_.run();
-	}
+    // å‡½æ•°æ³¨å†Œ
+    template <typename Function>
+    void register_handler(std::string const &name, const Function &f) {
+        // æ³¨å†Œå‡½æ•°
+        register_nonmember_func(name, std::move(f));
+    }
 
-	// º¯Êı×¢²á
-	template<typename Function>
-	void register_handler(std::string const& name, const Function& f) {
-		// ×¢²áº¯Êı
-		register_nonmember_func(name, std::move(f));
-	}
+  private:
+    // å¯åŠ¨å¼‚æ­¥æ¥å—è¿æ¥æ“ä½œ
+    void do_accept() {
+        // é‡ç½®æŒ‡é’ˆæ‰€æœ‰æƒ
+        conn_.reset(new connection(io_service_pool_.get_io_service(),
+                                   timeout_seconds_, sharedMapPtr_));
+        // å¼‚æ­¥ç­‰å¾…è¿æ¥,ä½¿ç”¨lambdaè¡¨è¾¾å¼
+        acceptor_.async_accept(
+            conn_->socket(), [this](boost::system::error_code ec) -> void {
+                if (ec) {
+                    return;
+                }
 
+                // è·å–è¿æ¥çš„è¿œç¨‹ç«¯ç‚¹ä¿¡æ¯
+                boost::asio::ip::tcp::endpoint remoteEndpoint =
+                    conn_->socket().remote_endpoint();
 
+                // è¾“å‡ºè¿æ¥çš„ IP å’Œç«¯å£å·
+                std::cout << "Accepted connection from: "
+                          << remoteEndpoint.address().to_string() << ":"
+                          << remoteEndpoint.port() << std::endl;
 
-private:
-	// Æô¶¯Òì²½½ÓÊÜÁ¬½Ó²Ù×÷
-	void do_accept() {
-		// ÖØÖÃÖ¸ÕëËùÓĞÈ¨
-		conn_.reset(new connection(io_service_pool_.get_io_service(), timeout_seconds_, sharedMapPtr_));
-		// Òì²½µÈ´ıÁ¬½Ó,Ê¹ÓÃlambda±í´ïÊ½
-		acceptor_.async_accept(conn_->socket(), [this](boost::system::error_code ec)->void {
-			if (ec) {
-				return;
-			}
+                // è¿æ¥çš„è¯»å–
+                conn_->start();
 
-			// »ñÈ¡Á¬½ÓµÄÔ¶³Ì¶ËµãĞÅÏ¢
-			boost::asio::ip::tcp::endpoint remoteEndpoint = conn_->socket().remote_endpoint();
+                // æ·»åŠ è¿æ¥ç¼–å·ï¼Œä½¿ç”¨åœ¨å±€éƒ¨åŸŸé¿å…æ­»é”
+                {
+                    std::unique_lock<std::mutex> lock(mtx_);
+                    conn_->set_conn_id(conn_id_);
+                    connections_[conn_id_++] = conn_;
+                }
+                // é€’å½’è°ƒç”¨è‡ªèº«ï¼Œä¸æ–­æ¥æ”¶æ–°çš„è¿æ¥
+                do_accept();
+            });
+    }
 
-			// Êä³öÁ¬½ÓµÄ IP ºÍ¶Ë¿ÚºÅ
-			std::cout << "Accepted connection from: " << remoteEndpoint.address().to_string()
-				<< ":" << remoteEndpoint.port() << std::endl;
+    // æ˜ å°„ä¸­åˆ é™¤è¶…æ—¶è¿æ¥ï¼Œé¿å…ç©ºé—´è†¨èƒ€
+    void clean() {
+        while (!stop_check_) {
+            std::unique_lock<std::mutex> lock(mtx_);
+            // æ›´é‡è¦çš„æ˜¯æé«˜ä¸€ç§å®šæ—¶æœºåˆ¶ï¼Œå®šæ—¶åˆ é™¤ä»¥æ–­å¼€çš„è¿æ¥
+            cv_.wait_for(lock, std::chrono::seconds(check_seconds_));
+            for (auto it = connections_.begin(); it != connections_.end();) {
+                if (it->second->has_closed()) {
+                    it = connections_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
 
-			// Á¬½ÓµÄ¶ÁÈ¡
-			conn_->start();
+    /*è¿œç¨‹è¿‡ç¨‹çš„è°ƒç”¨çš„ç³»åˆ—å‡½æ•°,æ³¨æ„ç‰¹åŒ–ç¬¬ä¸€ä¸ªä¸ºstring*/
+  private:
+    template <typename Function, size_t... Indices, typename Arg,
+              typename... Args>
+    static typename std::result_of<Function(Args...)>::type
+    call_helper(const Function &f, const std::index_sequence<Indices...> &,
+                std::tuple<Arg, Args...> tup) {
+        return f(std::move(std::get<Indices + 1>(tup))...);
+    }
 
-			// Ìí¼ÓÁ¬½Ó±àºÅ£¬Ê¹ÓÃÔÚ¾Ö²¿Óò±ÜÃâËÀËø
-			{
-				std::unique_lock<std::mutex> lock(mtx_);
-				conn_->set_conn_id(conn_id_);
-				connections_[conn_id_++] = conn_;
-			}
-			// µİ¹éµ÷ÓÃ×ÔÉí£¬²»¶Ï½ÓÊÕĞÂµÄÁ¬½Ó
-			do_accept();
-			});
-	}
+    // å¤„ç†è¿”å›ç±»å‹ void çš„å‡½æ•°è°ƒç”¨ã€‚
+    template <typename Function, typename Arg, typename... Args>
+    static typename std::enable_if<std::is_void<
+        typename std::result_of<Function(Args...)>::type>::value>::type
+    call(const Function &f, std::string &result, std::tuple<Arg, Args...> tp) {
+        call_helper(f, std::make_index_sequence<sizeof...(Args)>{},
+                    std::move(tp));
+        RPCbufferPack::msgpack_codec codec;
+        result = RPCbufferPack::msgpack_codec::pack_args_str(result_code::OK);
+    }
 
-	// Ó³ÉäÖĞÉ¾³ı³¬Ê±Á¬½Ó£¬±ÜÃâ¿Õ¼äÅòÕÍ
-	void clean() {
-		while (!stop_check_) {
-			std::unique_lock<std::mutex> lock(mtx_);
-			// ¸üÖØÒªµÄÊÇÌá¸ßÒ»ÖÖ¶¨Ê±»úÖÆ£¬¶¨Ê±É¾³ıÒÔ¶Ï¿ªµÄÁ¬½Ó
-			cv_.wait_for(lock, std::chrono::seconds(check_seconds_));
-			for (auto it = connections_.begin(); it != connections_.end();) {
-				if (it->second->has_closed()) {
-					it = connections_.erase(it);
-				}
-				else {
-					++it;
-				}
-			}
-		}
-	}
+    // å¤„ç†è¿”å›ç±»å‹é void çš„å‡½æ•°è°ƒç”¨ã€‚
+    template <typename Function, typename Arg, typename... Args>
+    static typename std::enable_if<!std::is_void<
+        typename std::result_of<Function(Args...)>::type>::value>::type
+    call(const Function &f, std::string &result, std::tuple<Arg, Args...> tp) {
+        auto r = call_helper(f, std::make_index_sequence<sizeof...(Args)>{},
+                             std::move(tp));
+        RPCbufferPack::msgpack_codec codec;
+        result =
+            RPCbufferPack::msgpack_codec::pack_args_str(result_code::OK, r);
+    }
 
+    template <typename Function> struct invoker {
+        // result æ˜¯è¿”å›ç»“æœå­—ç¬¦ä¸²
+        static inline void apply(const Function &func, const char *data,
+                                 size_t size, std::string &result) {
+            // å¤šäº†ä¸€ä¸ªstringå‚æ•°
+            using argstuple =
+                typename meta_util::function_traits<Function>::args_tuple;
+            RPCbufferPack::msgpack_codec codec;
+            try {
+                auto tp = codec.unpack<argstuple>(data, size);
+                // ä½¿ç”¨æ¨¡æ¿è°ƒç”¨==è¿™é‡ŒæŠ¥é”™äº†
+                call(func, result, std::move(tp));
+            } catch (std::invalid_argument &e) {
+                result = codec.pack_args_str(result_code::FAIL, e.what());
+            } catch (const std::exception &e) {
+                result = codec.pack_args_str(result_code::FAIL, e.what());
+            }
+        }
+    };
 
-	/*Ô¶³Ì¹ı³ÌµÄµ÷ÓÃµÄÏµÁĞº¯Êı,×¢ÒâÌØ»¯µÚÒ»¸öÎªstring*/
-private:
-	template <typename Function, size_t... Indices, typename Arg, typename... Args>
-	static typename std::result_of<Function(Args...)>::type call_helper(
-		const Function& f, const std::index_sequence<Indices...>&, std::tuple<Arg, Args...> tup) {
-		return f(std::move(std::get<Indices + 1>(tup))...);
-	}
+    // æ³¨å†Œå‡½æ•°,ä½¿ç”¨lambdaåˆ›å»ºæ–°çš„å‡½æ•°
+    template <typename Function>
+    void register_nonmember_func(std::string const &name, Function f) {
+        (*sharedMapPtr_)[name] = [f](const char *data, size_t size,
+                                     std::string &result) {
+            invoker<Function>::apply(std::move(f), data, size, result);
+        };
+    }
 
-	// ´¦Àí·µ»ØÀàĞÍ void µÄº¯Êıµ÷ÓÃ¡£
-	template <typename Function, typename Arg, typename... Args>
-	static typename std::enable_if<std::is_void<typename std::result_of<Function(Args...)>::type>::value>::type
-		call(const Function& f, std::string& result, std::tuple<Arg, Args...> tp) {
-		call_helper(f, std::make_index_sequence<sizeof...(Args)>{}, std::move(tp));
-		RPCbufferPack::msgpack_codec codec;
-		result = RPCbufferPack::msgpack_codec::pack_args_str(result_code::OK);
-	}
+  private:
+    io_service_pool io_service_pool_;         // ioäº‹ä»¶æ± 
+    boost::asio::ip::tcp::acceptor acceptor_; // tcpæ¥æ”¶å™¨
+    std::shared_ptr<connection> conn_;        // è¿æ¥ç±»çš„æŒ‡é’ˆ
+    // std::shared_ptr<std::thread> thd_; // å¼‚æ­¥æ‰§è¡Œçš„çº¿ç¨‹
+    std::size_t timeout_seconds_; // è¶…æ—¶è¿æ¥çš„æ—¶é—´
 
+    // è¿æ¥æ‰€ç”¨å˜é‡
+    int64_t conn_id_ = 0;
+    std::unordered_map<int64_t, std::shared_ptr<connection>>
+        connections_;                           // è¿æ¥åºå·æ˜ å°„
+    std::shared_ptr<std::thread> check_thread_; // å®šæ—¶æ¸…ç†çš„çº¿ç¨‹
+    size_t check_seconds_;                      // å®šæ—¶æ¸…ç†çš„æ—¶é—´
+    bool stop_check_ = false;
+    std::mutex mtx_;             // äº’æ–¥é”
+    std::condition_variable cv_; // æ¡ä»¶å˜é‡
 
-	// ´¦Àí·µ»ØÀàĞÍ·Ç void µÄº¯Êıµ÷ÓÃ¡£
-	template <typename Function, typename Arg, typename... Args>
-	static typename std::enable_if<!std::is_void<typename std::result_of<Function(Args...)>::type>::value>::type
-		call(const Function& f, std::string& result, std::tuple<Arg, Args...> tp) {
-		auto r = call_helper(f, std::make_index_sequence<sizeof...(Args)>{}, std::move(tp));
-		RPCbufferPack::msgpack_codec codec;
-		result = RPCbufferPack::msgpack_codec::pack_args_str(result_code::OK, r);
-	}
-
-
-	template<typename Function>
-	struct invoker {
-		// result ÊÇ·µ»Ø½á¹û×Ö·û´®
-		static inline void apply(const Function& func, const char* data, size_t size,
-			std::string& result) {
-			// ¶àÁËÒ»¸östring²ÎÊı
-			using argstuple = typename meta_util::function_traits<Function>::args_tuple;
-			RPCbufferPack::msgpack_codec codec;
-			try {
-				auto tp = codec.unpack<argstuple>(data, size);
-				// Ê¹ÓÃÄ£°åµ÷ÓÃ==ÕâÀï±¨´íÁË
-				call(func, result, std::move(tp));
-			}
-			catch (std::invalid_argument& e) {
-				result = codec.pack_args_str(result_code::FAIL, e.what());
-			}
-			catch (const std::exception& e) {
-				result = codec.pack_args_str(result_code::FAIL, e.what());
-			}
-
-		}
-	};
-
-	// ×¢²áº¯Êı,Ê¹ÓÃlambda´´½¨ĞÂµÄº¯Êı
-	template<typename Function>
-	void register_nonmember_func(std::string const& name, Function f) {
-		(*sharedMapPtr_)[name] = [f](const char* data, size_t size, std::string& result) {
-			invoker<Function>::apply(std::move(f), data, size, result);
-		};
-	}
-
-
-
-private:
-	io_service_pool io_service_pool_; // ioÊÂ¼ş³Ø
-	boost::asio::ip::tcp::acceptor acceptor_; // tcp½ÓÊÕÆ÷
-	std::shared_ptr<connection> conn_; // Á¬½ÓÀàµÄÖ¸Õë
-	//std::shared_ptr<std::thread> thd_; // Òì²½Ö´ĞĞµÄÏß³Ì
-	std::size_t timeout_seconds_;// ³¬Ê±Á¬½ÓµÄÊ±¼ä
-
-	// Á¬½ÓËùÓÃ±äÁ¿
-	int64_t conn_id_ = 0;
-	std::unordered_map<int64_t, std::shared_ptr<connection>> connections_; // Á¬½ÓĞòºÅÓ³Éä
-	std::shared_ptr<std::thread> check_thread_;// ¶¨Ê±ÇåÀíµÄÏß³Ì
-	size_t check_seconds_;// ¶¨Ê±ÇåÀíµÄÊ±¼ä
-	bool stop_check_ = false;
-	std::mutex mtx_; // »¥³âËø
-	std::condition_variable cv_; // Ìõ¼ş±äÁ¿
-
-	// º¯ÊıÓ³Éä±íÖ¸Õë£¬ºÍÃ¿¸öconnection¹²Ïí
-	std::shared_ptr<std::unordered_map<std::string, std::function<void(const char*, size_t, std::string&)>>> sharedMapPtr_;
-
+    // å‡½æ•°æ˜ å°„è¡¨æŒ‡é’ˆï¼Œå’Œæ¯ä¸ªconnectionå…±äº«
+    std::shared_ptr<std::unordered_map<
+        std::string, std::function<void(const char *, size_t, std::string &)>>>
+        sharedMapPtr_;
 };
-
 
 #endif

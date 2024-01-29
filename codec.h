@@ -2,60 +2,57 @@
 #ifndef TINY_RPC_CODEC_H_
 #define TINY_RPC_CODEC_H_
 
-
 #include <msgpack.hpp>
 
 using buffer_type = msgpack::sbuffer;
 
 namespace RPCbufferPack {
 
-	//using buffer_type = msgpack::sbuffer;
+struct msgpack_codec {
+  public:
+    const static size_t init_size = 2 * 1024; //  MessagePack ç¼“å†²åŒºçš„åˆå§‹å¤§å°
 
-	struct msgpack_codec {
-	public:
-		const static size_t init_size = 2 * 1024; //  MessagePack »º³åÇøµÄ³õÊ¼´óĞ¡
+    // æ‰“åŒ…å‚æ•°
+    template <typename... Args> static buffer_type pack_args(Args &&...args) {
+        buffer_type buffer(init_size);
+        // ä½¿ç”¨å®Œç¾è½¬å‘ï¼Œä¿ç•™å‚æ•°çš„å¼•ç”¨ç±»å‹ï¼Œå¹¶ç»„æˆä¸€ä¸ªtupleï¼Œæ–¹ä¾¿åºåˆ—åŒ–
+        msgpack::pack(buffer,
+                      std::forward_as_tuple(std::forward<Args>(args)...));
+        return buffer;
+    }
 
-		// ´ò°ü²ÎÊı
-		template<typename... Args>
-		static buffer_type pack_args(Args&&... args) {
-			buffer_type buffer(init_size);
-			// Ê¹ÓÃÍêÃÀ×ª·¢£¬±£Áô²ÎÊıµÄÒıÓÃÀàĞÍ£¬²¢×é³ÉÒ»¸ötuple£¬·½±ãĞòÁĞ»¯
-			msgpack::pack(buffer, std::forward_as_tuple(std::forward<Args>(args)...));
-			return buffer;
-		}
+    // æ‰“åŒ…æšä¸¾ç±»å‹ï¼Œå¹¶è¿”å›std::string å¯¹è±¡ã€‚
+    template <
+        typename Arg, typename... Args,
+        typename = typename std::enable_if<std::is_enum<Arg>::value>::type>
+    static std::string pack_args_str(Arg arg, Args &&...args) {
+        buffer_type buffer(init_size);
+        msgpack::pack(buffer, std::forward_as_tuple(
+                                  (int)arg, std::forward<Args>(args)...));
+        return std::string(buffer.data(), buffer.size());
+    }
 
-		// ´ò°üÃ¶¾ÙÀàĞÍ£¬²¢·µ»Østd::string ¶ÔÏó¡£
-		template<typename Arg, typename... Args,
-			typename = typename std::enable_if<std::is_enum<Arg>::value>::type>
-			static std::string pack_args_str(Arg arg, Args&&... args) {
-			buffer_type buffer(init_size);
-			msgpack::pack(buffer, std::forward_as_tuple((int)arg, std::forward<Args>(args)...));
-			return std::string(buffer.data(), buffer.size());
-		}
+    // æ‰“åŒ…å•ä¸ªå‚æ•°
+    template <typename T> buffer_type pack(T &&t) const {
+        buffer_type buffer;
+        msgpack::pack(buffer, std::forward<T>(t));
+        return buffer;
+    }
 
-		// ´ò°üµ¥¸ö²ÎÊı
-		template<typename T>
-		buffer_type pack(T&& t) const {
-			buffer_type buffer;
-			msgpack::pack(buffer, std::forward<T>(t));
-			return buffer;
-		}
+    // è§£åŒ…ï¼Œè¿”å›è§£åŒ…åçš„å¯¹è±¡
+    template <typename T> T unpack(char const *data, size_t length) {
+        try {
+            msgpack::unpack(msg_, data, length);
+            return msg_.get().as<T>();
+        } catch (...) {
+            throw std::invalid_argument("unpack failed: Args not match!");
+        }
+    }
 
-		//½â°ü£¬·µ»Ø½â°üºóµÄ¶ÔÏó
-		template<typename T>
-		T unpack(char const* data, size_t length) {
-			try {
-				msgpack::unpack(msg_, data, length);
-				return msg_.get().as<T>();
-			}
-			catch (...) { throw std::invalid_argument("unpack failed: Args not match!"); }
-		}
+  private:
+    msgpack::unpacked msg_;
+};
 
-	private:
-		msgpack::unpacked msg_;
-	};
-
-}
-
+} // namespace RPCbufferPack
 
 #endif
